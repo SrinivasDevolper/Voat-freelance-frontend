@@ -1,7 +1,7 @@
 import { Component } from "react";
 import { Link } from "react-router-dom";
 import { Navigate } from "react-router-dom";
-import { Eye, EyeOff, ChevronDown, Home, MapPin } from "lucide-react";
+import { Eye, EyeOff, ChevronDown, Home, MapPin, Mail, ArrowLeft, RefreshCw } from "lucide-react";
 import axios from "axios";
 import "./index.css";
 
@@ -88,6 +88,13 @@ class SignupPage extends Component {
     showWelcomeCard: false,
     agreeToTerms: false,
     isGettingLocation: false,
+    // OTP related states
+    showOtpVerification: false,
+    otp: ["", "", "", "", "", ""],
+    otpError: "",
+    isOtpSubmitting: false,
+    otpResendCountdown: 0,
+    userDataForOtp: null,
   };
 
   // Backend URLs
@@ -336,37 +343,196 @@ class SignupPage extends Component {
     return Object.keys(errors).length === 0;
   };
 
+  // OTP handling methods
+  handleOtpChange = (index, value) => {
+    if (value.length > 1) return; // Only allow single digit
+    
+    const newOtp = [...this.state.otp];
+    newOtp[index] = value;
+    
+    this.setState({ 
+      otp: newOtp,
+      otpError: "" // Clear error when user types
+    });
+
+    // Auto-focus next input
+    if (value && index < 5) {
+      const nextInput = document.querySelector(`input[data-otp-index="${index + 1}"]`);
+      if (nextInput) nextInput.focus();
+    }
+  };
+
+  handleOtpKeyDown = (index, e) => {
+    // Handle backspace
+    if (e.key === 'Backspace' && !this.state.otp[index] && index > 0) {
+      const prevInput = document.querySelector(`input[data-otp-index="${index - 1}"]`);
+      if (prevInput) prevInput.focus();
+    }
+  };
+
+  handleOtpPaste = (e) => {
+    e.preventDefault();
+    const pastedData = e.clipboardData.getData('text').slice(0, 6);
+    if (/^\d{6}$/.test(pastedData)) {
+      const otpArray = pastedData.split('');
+      this.setState({ 
+        otp: [...otpArray, ...Array(6 - otpArray.length).fill("")],
+        otpError: ""
+      });
+    }
+  };
+
+  resendOtp = async () => {
+    if (this.state.otpResendCountdown > 0) return;
+    
+    this.setState({ isOtpSubmitting: true });
+    
+    try {
+      const baseUrl = this.getBackendUrl();
+      await axios.post(
+        `${baseUrl}/api/resend-otp`,
+        { email: this.state.email },
+        {
+          withCredentials: true,
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          timeout: 10000,
+        }
+      );
+      
+      // Start countdown
+      this.setState({ 
+        otpResendCountdown: 60,
+        isOtpSubmitting: false 
+      });
+      
+      const countdownInterval = setInterval(() => {
+        this.setState(prevState => {
+          if (prevState.otpResendCountdown <= 1) {
+            clearInterval(countdownInterval);
+            return { otpResendCountdown: 0 };
+          }
+          return { otpResendCountdown: prevState.otpResendCountdown - 1 };
+        });
+      }, 1000);
+      
+    } catch (error) {
+      console.error("Error resending OTP:", error);
+      this.setState({ 
+        isOtpSubmitting: false,
+        otpError: "Failed to resend OTP. Please try again."
+      });
+    }
+  };
+
+  verifyOtp = async () => {
+    const otpString = this.state.otp.join('');
+    
+    if (otpString.length !== 6) {
+      this.setState({ otpError: "Please enter the complete 6-digit OTP" });
+      return;
+    }
+    
+    this.setState({ isOtpSubmitting: true, otpError: "" });
+    
+    try {
+      const baseUrl = this.getBackendUrl();
+      const response = await axios.post(
+        `${baseUrl}/api/verify-otp`,
+        { 
+          email: this.state.email,
+          otp: otpString 
+        },
+        {
+          withCredentials: true,
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          timeout: 10000,
+        }
+      );
+
+      if (response.data && response.data.success) {
+        // OTP verified successfully, proceed with registration
+        this.completeRegistration();
+      } else {
+        this.setState({ 
+          otpError: "Invalid OTP. Please check and try again.",
+          isOtpSubmitting: false 
+        });
+      }
+    } catch (error) {
+      console.error("OTP verification error:", error);
+      this.setState({ 
+        otpError: "Verification failed. Please try again.",
+        isOtpSubmitting: false 
+      });
+    }
+  };
+
+  completeRegistration = async () => {
+    try {
+      // Store user data in localStorage
+      const userData = this.state.userDataForOtp;
+      console.log("Storing user data in localStorage:", userData);
+      localStorage.setItem("user", JSON.stringify(userData));
+
+      // Show welcome message if available
+      if (window.showWelcomeMessage) {
+        window.showWelcomeMessage();
+      } else if (
+        window.navbarComponent &&
+        typeof window.navbarComponent.showWelcomeMessage === "function"
+      ) {
+        window.navbarComponent.showWelcomeMessage();
+      } else {
+        // If no welcome message function is available, trigger login notification as fallback
+        if (
+          window.navbarComponent &&
+          typeof window.navbarComponent.handleLogin === "function"
+        ) {
+          window.navbarComponent.handleLogin(userData);
+        }
+      }
+
+      // Show welcome card
+      this.setState({ 
+        showWelcomeCard: true,
+        isOtpSubmitting: false,
+        showOtpVerification: false
+      });
+
+      // Hide welcome card and redirect after 5 seconds
+      setTimeout(() => {
+        this.setState({
+          showWelcomeCard: false,
+          redirectToLogin: true,
+        });
+      }, 5000);
+    } catch (error) {
+      console.error("Error completing registration:", error);
+      this.setState({ 
+        isOtpSubmitting: false,
+        otpError: "Registration completion failed. Please try again."
+      });
+    }
+  };
+
   handleSubmit = async (e) => {
     e.preventDefault();
 
     if (this.validateForm()) {
       this.setState({ isSubmitting: true });
 
-      this.setState({
-        errors: {
-          ...this.state.errors,
-          general: "Registration failed. Please try again.",
-        },
-        isSubmitting: false,
-      });
-
-      setTimeout(() => {
-        this.setState((prevState) => ({
-          errors: {
-            ...prevState.errors,
-            general: null,
-          },
-        }));
-      }, 10000);
-
       try {
         // Get the current backend URL
         const baseUrl = this.getBackendUrl();
         console.log("Using backend URL for signup:", baseUrl);
 
-        // ONLY use the actual API for signup - no test mode fallback
-        console.log("Attempting to sign up with API...");
-
+        // Send registration data to get OTP
         const response = await axios.post(
           `${baseUrl}/api/signup`,
           {
@@ -374,9 +540,7 @@ class SignupPage extends Component {
             email: this.state.email,
             password: this.state.password,
             role: this.state.role,
-            // profession: this.state.profession,
             location: this.state.location,
-            // phone: this.state.phone, // Add this line
           },
           {
             withCredentials: true,
@@ -390,57 +554,32 @@ class SignupPage extends Component {
 
         console.log("API signup response:", response.data);
 
-        if (response.data && response.data.success && response.data.user) {
-          // Success! Use the API response data
+        if (response.data && response.data.success) {
+          // Store user data temporarily for OTP verification
           const userData = response.data.user;
-          console.log("Successfully signed up with API, user data:", userData);
+          this.setState({
+            userDataForOtp: userData,
+            showOtpVerification: true,
+            isSubmitting: false,
+            otpResendCountdown: 60 // Start countdown for resend
+          });
 
-          // Clear localStorage first to ensure we trigger storage event
-          localStorage.removeItem("user");
-
-          // Small delay to ensure removal is processed
-          await new Promise((resolve) => setTimeout(resolve, 100));
-
-          // Store user data in localStorage
-          console.log("Storing user data in localStorage:", userData);
-          localStorage.setItem("user", JSON.stringify(userData));
-
-          // Show welcome message if available
-          if (window.showWelcomeMessage) {
-            window.showWelcomeMessage();
-          } else if (
-            window.navbarComponent &&
-            typeof window.navbarComponent.showWelcomeMessage === "function"
-          ) {
-            window.navbarComponent.showWelcomeMessage();
-          } else {
-            // If no welcome message function is available, trigger login notification as fallback
-            if (
-              window.navbarComponent &&
-              typeof window.navbarComponent.handleLogin === "function"
-            ) {
-              window.navbarComponent.handleLogin(userData);
-            }
-          }
-
-          // Show welcome card
-          this.setState({ showWelcomeCard: true });
-
-          // Hide welcome card and redirect after 5 seconds
-          setTimeout(() => {
-            this.setState({
-              showWelcomeCard: false,
-              redirectToLogin: true,
+          // Start countdown for resend
+          const countdownInterval = setInterval(() => {
+            this.setState(prevState => {
+              if (prevState.otpResendCountdown <= 1) {
+                clearInterval(countdownInterval);
+                return { otpResendCountdown: 0 };
+              }
+              return { otpResendCountdown: prevState.otpResendCountdown - 1 };
             });
-          }, 5000);
+          }, 1000);
+
         } else {
-          // API response was not as expected
           throw new Error("Invalid response from API");
         }
       } catch (error) {
         console.error("Registration error:", error);
-
-        // Handle error states
         this.setState({
           errors: {
             ...this.state.errors,
@@ -448,13 +587,6 @@ class SignupPage extends Component {
           },
           isSubmitting: false,
         });
-      } finally {
-        // Reset submitting state in case redirect doesn't happen
-        setTimeout(() => {
-          if (this.state.isSubmitting) {
-            this.setState({ isSubmitting: false });
-          }
-        }, 3000);
       }
     }
   };
@@ -469,11 +601,107 @@ class SignupPage extends Component {
       showWelcomeCard,
       name,
       isGettingLocation,
+      showOtpVerification,
+      otp,
+      otpError,
+      isOtpSubmitting,
+      otpResendCountdown,
     } = this.state;
 
     // Redirect to login page if registration was successful
     if (redirectToLogin) {
       return <Navigate to="/login" />;
+    }
+
+    // Show OTP verification screen
+    if (showOtpVerification) {
+      return (
+        <div className="register-screen">
+          <Link to="/" className="register-home-button">
+            <Home className="h-5 w-5" />
+            <span>Home</span>
+          </Link>
+
+          <div className="register-container">
+            <div className="register-form-wrapper otp-verification-wrapper">
+              <div className="otp-header">
+                <button 
+                  onClick={() => this.setState({ showOtpVerification: false })}
+                  className="otp-back-button"
+                >
+                  <ArrowLeft className="h-5 w-5" />
+                  <span>Back</span>
+                </button>
+                
+                <div className="otp-icon-wrapper">
+                  <Mail className="h-8 w-8" />
+                </div>
+                
+                <h2 className="otp-title">Verify your email</h2>
+                <p className="otp-subtitle">
+                  We've sent a 6-digit verification code to
+                  <br />
+                  <strong>{this.state.email}</strong>
+                </p>
+              </div>
+
+              <div className="otp-input-container">
+                <div className="otp-inputs">
+                  {otp.map((digit, index) => (
+                    <input
+                      key={index}
+                      type="text"
+                      maxLength="1"
+                      value={digit}
+                      onChange={(e) => this.handleOtpChange(index, e.target.value)}
+                      onKeyDown={(e) => this.handleOtpKeyDown(index, e)}
+                      onPaste={this.handleOtpPaste}
+                      data-otp-index={index}
+                      className={`otp-input ${digit ? 'filled' : ''}`}
+                      placeholder="•"
+                    />
+                  ))}
+                </div>
+                
+                {otpError && (
+                  <p className="otp-error">{otpError}</p>
+                )}
+              </div>
+
+              <button
+                onClick={this.verifyOtp}
+                disabled={isOtpSubmitting || otp.join('').length !== 6}
+                className="otp-verify-button"
+              >
+                {isOtpSubmitting ? (
+                  <>
+                    <RefreshCw className="h-5 w-5 animate-spin" />
+                    Verifying...
+                  </>
+                ) : (
+                  "Verify & Complete Registration"
+                )}
+              </button>
+
+              <div className="otp-resend-section">
+                <p className="otp-resend-text">
+                  Didn't receive the code?
+                </p>
+                <button
+                  onClick={this.resendOtp}
+                  disabled={otpResendCountdown > 0 || isOtpSubmitting}
+                  className="otp-resend-button"
+                >
+                  {otpResendCountdown > 0 
+                    ? `Resend in ${otpResendCountdown}s`
+                    : "Resend code"
+                  }
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
     }
 
     return (
